@@ -1,0 +1,355 @@
+// v3_全为逆时针.cpp : 此文件包含 "main" 函数。程序执行将在此处开始并结束。
+//极化源为周期性的回形磁结构排布。此程序用来计算此时的V_axion的力
+#include <iostream>
+#include <time.h>
+#include <cmath>
+#include <gsl/gsl_rng.h>
+#include <gsl/gsl_monte.h>
+#include <gsl/gsl_monte_vegas.h> 
+#include <fstream> 
+#include <omp.h> 
+#include <ctime> 
+using namespace std;
+struct my_par
+{
+	double a, b, c;
+};//不用管，但是不能删
+double function_x_para(double* x, size_t dim, void* params); //case1:沿着x平行
+double function_x_antipara(double* x, size_t dim, void* params);//case2:沿着x反平行
+double function_y_para(double* x, size_t dim, void* params); //case3:沿着y平行
+double function_y_antipara(double* x, size_t dim, void* params); //case4:沿着y反平行
+double function_verti(double* x, size_t dim, void* params); //case5:垂直
+double function_antiverti(double* x, size_t dim, void* params); //case6:反垂直
+void integral_long(double xsite, double ysite, int oyz, int k, int n); //极化源长条和微悬臂作用
+void integral_short(double xsite, double ysite, int oyz, int k, int n); //极化源短条和微悬臂作用
+
+int const dimension = 5;//计算五重积分(积分上下限须为常数)
+int const k_number = 10, n_number = 10; //分别沿着x、y正方向的长条数目
+int const max_drift = 56; //悬臂沿y的最大偏移(只能是正数，负数的需求由下方的um变量实现)
+double const um = 1e-6; //正负决定悬臂的移动方向。正号向右，负号向左（参考王倩报告中的方向）。悬臂每次移动1um
+double const d = 10e-6;  //um*max_drift才是漂移距离
+int const call_times = 10000;//蒙特卡洛积分中调用随机数的次数。调用越多，精度越高，但运算速度越慢
+char file_name[200] = "data14.txt";//输出的文件名
+char check_name[200] = "check1.txt";//输出的文件名
+
+double const l1 = 40e-6, w1 = 6e-6, l11 = 8e-6, w11 = 6e-6, t1 = 1e-6, n1 = 6.59e28;
+double const l2 = 40e-6, w2 = 6e-6, l22 = 8e-6, w22 = 6e-6, t2 = 1e-6, n2 = 6.59e28, x_gap = 20e-6, y_gap = 8e-6;
+double const x_period = l2 + x_gap, y_period = w2 + y_gap; //沿着x轴和y轴的半周期（即相邻窄条间的距离）
+double const hbar = 1.0545e-34, me = 9.1095e-31, c = 299792458, lambda = 10e-6;
+double const f3 = -hbar * hbar * hbar *n1*n2 / (4 * me* me* c);
+double const beta = 1 / lambda; //计算机计算乘法更快，故将所有分母转化为其倒数，再进行计算
+int k, n, oyz;
+double result_force[max_drift][2 * k_number][2 * n_number][2];
+double force[max_drift];
+
+
+int main()
+{
+	gsl_rng_default_seed = ((unsigned long)(time(NULL)));
+	for (oyz = 0; oyz < max_drift; oyz++)  //初始化数组
+	{
+		force[oyz] = 0;
+		for (k = -k_number; k < k_number; k++)
+		{
+			for (n = -n_number; n < n_number; n++)
+			{
+				result_force[oyz][k + k_number][n + n_number][0] = 0;
+				result_force[oyz][k + k_number][n + n_number][1] = 0;
+			}
+		}
+	}
+
+	double sign = 0;
+#pragma omp parallel for private (oyz,k,n)
+	for (oyz = 0; oyz < max_drift; oyz++) //开始计算
+	{
+		for (k = -k_number; k < k_number; k++)
+		{
+			for (n = -n_number; n < n_number; n++)
+			{
+				/*if (abs(k) % 2 == 0 && abs(n) % 4 == 2)
+					continue;
+				if (abs(k) % 2 == 0 && abs(n) % 4 == 3)
+					continue;
+				if (abs(k) % 2 == 1 && abs(n) % 4 == 0)
+					continue;
+				if (abs(k) % 2 == 1 && abs(n) % 4 == 1)
+					continue;*/
+				integral_long(k*x_period, n*y_period, oyz, k, n);
+				integral_short(k*x_period - w22 + (l2 + w22)*(n % 2), y_period * 2 * floor(n / 2) + w2, oyz, k, n);
+			}
+		}
+		sign = sign + 1;
+		cout << sign/max_drift*100<<"% completed" << endl;//监测运行进度
+	}
+
+	for (oyz = 0; oyz < max_drift; oyz++) //整理结果
+	{
+		for (k = -k_number; k < k_number; k++)
+		{
+			for (n = -n_number; n < n_number; n++)
+			{
+				for (int i = 0; i < 2; i++)
+				{
+					force[oyz] += result_force[oyz][k + k_number][n + n_number][i];
+				}
+
+			}
+		}
+	}
+
+	ofstream fout;//输出结果
+	fout.open(file_name, ios::app);//文件名
+	for (int oyz = 0; oyz < max_drift; oyz++)
+		fout << oyz * um << " " << force[oyz] << endl;
+	fout.close();
+
+	fout.open(check_name, ios::app);//文件名
+	fout << "k_number: " << k_number << "  n_number: " << n_number << endl;
+	fout << l1 << " " << w1 << " " << t1 << " " << l11 << " " << w11 << " " << endl;
+	fout << l2 << " " << w2 << " " << t2 << " " << l22 << " " << w22 << " " << endl;
+	fout << "d: " << d << endl;
+	fout << "y_gap: " << y_gap << endl;
+	fout << "lambda: " << lambda << endl;
+	fout << "call: " << call_times << endl;
+	fout.close();
+
+	return 0;
+}
+
+double function_x_para(double* x, size_t dim, void* params) //case1:沿着x平行
+{
+	my_par* mp = (my_par*)params;
+	double r1, r2, k1, k2, f1, f2, f;
+	r1 = sqrt((x[0] - x[2])*(x[0] - x[2]) + (x[1] - x[3])*(x[1] - x[3]) + (d + t1 - x[4])*(d + t1 - x[4]));
+	r2 = sqrt((x[0] - x[2])*(x[0] - x[2]) + (x[1] - x[3])*(x[1] - x[3]) + (d - x[4])*(d - x[4]));
+	k1 = 1 / r1, k2 = 1 / r2;
+	f1 = -f3 * exp(-r1 * beta)*((beta*k1*k1 + k1 * k1*k1) - (x[0] - x[2])*(x[0] - x[2])*k1*k1*(beta*beta*k1 + 3 * beta*k1*k1 + 3 * k1*k1*k1));
+	f2 = -f3 * exp(-r2 * beta)*((beta*k2*k2 + k2 * k2*k2) - (x[0] - x[2])*(x[0] - x[2])*k2*k2*(beta*beta*k2 + 3 * beta*k2*k2 + 3 * k2*k2*k2));
+	f = f1 - f2;
+	return f;
+}
+
+double function_x_antipara(double* x, size_t dim, void* params)//case2:沿着x反平行
+{
+	my_par* mp = (my_par*)params;
+	double r1, r2, k1, k2, f1, f2, f;
+	r1 = sqrt((x[0] - x[2])*(x[0] - x[2]) + (x[1] - x[3])*(x[1] - x[3]) + (d + t1 - x[4])*(d + t1 - x[4]));
+	r2 = sqrt((x[0] - x[2])*(x[0] - x[2]) + (x[1] - x[3])*(x[1] - x[3]) + (d - x[4])*(d - x[4]));
+	k1 = 1 / r1, k2 = 1 / r2;
+	f1 = f3 * exp(-r1 * beta)*((beta*k1*k1 + k1 * k1*k1) - (x[0] - x[2])*(x[0] - x[2])*k1*k1*(beta*beta*k1 + 3 * beta*k1*k1 + 3 * k1*k1*k1));
+	f2 = f3 * exp(-r2 * beta)*((beta*k2*k2 + k2 * k2*k2) - (x[0] - x[2])*(x[0] - x[2])*k2*k2*(beta*beta*k2 + 3 * beta*k2*k2 + 3 * k2*k2*k2));
+	f = f1 - f2;
+	return f;
+}
+
+double function_y_para(double* x, size_t dim, void* params) //case3:沿着y平行
+{
+	my_par* mp = (my_par*)params;
+	double r1, r2, k1, k2, f1, f2, f;
+	r1 = sqrt((x[0] - x[2])*(x[0] - x[2]) + (x[1] - x[3])*(x[1] - x[3]) + (d + t1 - x[4])*(d + t1 - x[4]));
+	r2 = sqrt((x[0] - x[2])*(x[0] - x[2]) + (x[1] - x[3])*(x[1] - x[3]) + (d - x[4])*(d - x[4]));
+	k1 = 1 / r1, k2 = 1 / r2;
+	f1 = -f3 * exp(-r1 * beta)*((beta*k1*k1 + k1 * k1*k1) - (x[1] - x[3])*(x[1] - x[3])*k1*k1*(beta*beta*k1 + 3 * beta*k1*k1 + 3 * k1*k1*k1));
+	f2 = -f3 * exp(-r2 * beta)*((beta*k2*k2 + k2 * k2*k2) - (x[1] - x[3])*(x[1] - x[3])*k2*k2*(beta*beta*k2 + 3 * beta*k2*k2 + 3 * k2*k2*k2));
+	f = f1 - f2;
+	return f;
+}
+
+double function_y_antipara(double* x, size_t dim, void* params) //case4:沿着y反平行
+{
+	my_par* mp = (my_par*)params;
+	double r1, r2, k1, k2, f1, f2, f;
+	r1 = sqrt((x[0] - x[2])*(x[0] - x[2]) + (x[1] - x[3])*(x[1] - x[3]) + (d + t1 - x[4])*(d + t1 - x[4]));
+	r2 = sqrt((x[0] - x[2])*(x[0] - x[2]) + (x[1] - x[3])*(x[1] - x[3]) + (d - x[4])*(d - x[4]));
+	k1 = 1 / r1, k2 = 1 / r2;
+	f1 = f3 * exp(-r1 * beta)*((beta*k1*k1 + k1 * k1*k1) - (x[1] - x[3])*(x[1] - x[3])*k1*k1*(beta*beta*k1 + 3 * beta*k1*k1 + 3 * k1*k1*k1));
+	f2 = f3 * exp(-r2 * beta)*((beta*k2*k2 + k2 * k2*k2) - (x[1] - x[3])*(x[1] - x[3])*k2*k2*(beta*beta*k2 + 3 * beta*k2*k2 + 3 * k2*k2*k2));
+	f = f1 - f2;
+	return f;
+}
+
+double function_verti(double* x, size_t dim, void* params) //case5:垂直
+{
+	my_par* mp = (my_par*)params;
+	double r1, r2, k1, k2, f1, f2, f;
+	r1 = sqrt((x[0] - x[2])*(x[0] - x[2]) + (x[1] - x[3])*(x[1] - x[3]) + (d + t1 - x[4])*(d + t1 - x[4]));
+	r2 = sqrt((x[0] - x[2])*(x[0] - x[2]) + (x[1] - x[3])*(x[1] - x[3]) + (d - x[4])*(d - x[4]));
+	k1 = 1 / r1, k2 = 1 / r2;
+	f1 = -f3 * exp(-r1 * beta)*(-(x[0] - x[2])*(x[1] - x[3])*k1*k1*(beta*beta*k1 + 3 * beta*k1*k1 + 3 * k1*k1*k1));
+	f2 = -f3 * exp(-r2 * beta)*(-(x[0] - x[2])*(x[1] - x[3])*k2*k2*(beta*beta*k2 + 3 * beta*k2*k2 + 3 * k2*k2*k2));
+	f = f1 - f2;
+	return f;
+}
+
+
+double function_antiverti(double* x, size_t dim, void* params) //case6:反垂直
+{
+	my_par* mp = (my_par*)params;
+	double r1, r2, k1, k2, f1, f2, f;
+	r1 = sqrt((x[0] - x[2])*(x[0] - x[2]) + (x[1] - x[3])*(x[1] - x[3]) + (d + t1 - x[4])*(d + t1 - x[4]));
+	r2 = sqrt((x[0] - x[2])*(x[0] - x[2]) + (x[1] - x[3])*(x[1] - x[3]) + (d - x[4])*(d - x[4]));
+	k1 = 1 / r1, k2 = 1 / r2;
+	f1 = f3 * exp(-r1 * beta)*(-(x[0] - x[2])*(x[1] - x[3])*k1*k1*(beta*beta*k1 + 3 * beta*k1*k1 + 3 * k1*k1*k1));
+	f2 = f3 * exp(-r2 * beta)*(-(x[0] - x[2])*(x[1] - x[3])*k2*k2*(beta*beta*k2 + 3 * beta*k2*k2 + 3 * k2*k2*k2));
+	f = f1 - f2;
+	return f;
+}
+
+void integral_long(double xsite, double ysite, int oyz, int k, int n) //极化源长条和微悬臂作用
+{
+	//与悬臂左边的作用
+	my_par par = { 0,0,0 };//这一行不用管
+	gsl_monte_function f1, f2, f3, f4;
+	f1.dim = dimension;
+	f1.f = function_x_para; //被积函数的名字
+	f1.params = &par;
+	int calls = call_times;
+	double xl1[] = { 0, 0 + um * oyz, xsite, ysite, -t2 }, xu1[] = { l1, w1 + um * oyz, xsite + l2, ysite + w2, 0 };
+	double result1 = 0, er1 = 0;
+	gsl_monte_vegas_state* ps1 = gsl_monte_vegas_alloc(dimension);
+	const gsl_rng_type* tp1 = gsl_rng_minstd;
+	gsl_rng* pr1 = gsl_rng_alloc(tp1);
+	gsl_monte_vegas_init(ps1);
+	gsl_monte_vegas_integrate(&f1,
+		xl1, xu1, dimension, calls,
+		pr1, ps1, &result1, &er1);
+	//与悬臂右边的作用
+	f2.dim = dimension;
+	f2.f = function_x_antipara; //被积函数的名字
+	f2.params = &par;
+	double xl2[] = { 0, y_period + um * oyz,xsite, ysite, -t2 }, xu2[] = { l1 , y_period + w1 + um * oyz, xsite + l2, ysite + w2, 0 };
+	double result2 = 0, er2 = 0;
+	gsl_monte_vegas_state* ps2 = gsl_monte_vegas_alloc(dimension);
+	const gsl_rng_type* tp2 = gsl_rng_minstd;
+	gsl_rng* pr2 = gsl_rng_alloc(tp2);
+	gsl_monte_vegas_init(ps2);
+	gsl_monte_vegas_integrate(&f2,
+		xl2, xu2, dimension, calls,
+		pr2, ps2, &result2, &er2);
+	//与悬臂上边的作用
+	f3.dim = dimension;
+	f3.f = function_antiverti; //被积函数的名字
+	f3.params = &par;
+	double xl3[] = { -w11, w1 + um * oyz,xsite, ysite, -t2 }, xu3[] = { 0,y_period + um * oyz,  xsite + l2, ysite + w2, 0 };
+	double result3 = 0, er3 = 0;
+	gsl_monte_vegas_state* ps3 = gsl_monte_vegas_alloc(dimension);
+	const gsl_rng_type* tp3 = gsl_rng_minstd;
+	gsl_rng* pr3 = gsl_rng_alloc(tp3);
+	gsl_monte_vegas_init(ps3);
+	gsl_monte_vegas_integrate(&f3,
+		xl3, xu3, dimension, calls,
+		pr3, ps3, &result3, &er3);
+	//与悬臂下边的作用
+	f4.dim = dimension;
+	f4.f = function_verti; //被积函数的名字
+	f4.params = &par;
+	double xl4[] = { l1 , w1 + um * oyz,xsite, ysite, -t2 }, xu4[] = { l1 + w11, y_period + um * oyz,  xsite + l2, ysite + w2, 0 };
+	double result4 = 0, er4 = 0;
+	gsl_monte_vegas_state* ps4 = gsl_monte_vegas_alloc(dimension);
+	const gsl_rng_type* tp4 = gsl_rng_minstd;
+	gsl_rng* pr4 = gsl_rng_alloc(tp4);
+	gsl_monte_vegas_init(ps4);
+	gsl_monte_vegas_integrate(&f4,
+		xl4, xu4, dimension, calls,
+		pr4, ps4, &result4, &er4);
+	//求和
+	if ((abs(n) % 2) == 0) //n是偶数，说明长条沿着x正向极化
+	{
+		result_force[oyz][k + k_number][n + n_number][0] = result1 + result2 + result3 + result4;
+	}
+	if ((abs(n) % 2) == 1) //n是奇数，说明长条沿着x负向极化
+	{
+		result_force[oyz][k + k_number][n + n_number][0] = -(result1 + result2 + result3 + result4);
+	}
+	//释放内存空间
+	gsl_monte_vegas_free(ps1);
+	gsl_monte_vegas_free(ps2);
+	gsl_monte_vegas_free(ps3);
+	gsl_monte_vegas_free(ps4);
+}
+
+void integral_short(double xsite, double ysite, int oyz, int k, int n) //极化源短条和微悬臂作用
+{
+	//与悬臂左边的作用
+	my_par par = { 0,0,0 };//这一行不用管
+	gsl_monte_function f1, f2, f3, f4;
+	f1.dim = dimension;
+	f1.f = function_antiverti; //被积函数的名字
+	f1.params = &par;
+	int calls = call_times;
+	double xl1[] = { 0, 0 + um * oyz, xsite, ysite, -t2 }, xu1[] = { l1, w1 + um * oyz, xsite + w22, ysite + l22, 0 };
+	double result1 = 0, er1 = 0;
+	gsl_monte_vegas_state* ps1 = gsl_monte_vegas_alloc(dimension);
+	const gsl_rng_type* tp1 = gsl_rng_minstd;
+	gsl_rng* pr1 = gsl_rng_alloc(tp1);
+	gsl_monte_vegas_init(ps1);
+	gsl_monte_vegas_integrate(&f1,
+		xl1, xu1, dimension, calls,
+		pr1, ps1, &result1, &er1);
+	//与悬臂右边的作用
+	f2.dim = dimension;
+	f2.f = function_verti; //被积函数的名字
+	f2.params = &par;
+	double xl2[] = { 0, y_period + um * oyz,xsite, ysite, -t2 }, xu2[] = { l1 , y_period + w1 + um * oyz, xsite + w22, ysite + l22, 0 };
+	double result2 = 0, er2 = 0;
+	gsl_monte_vegas_state* ps2 = gsl_monte_vegas_alloc(dimension);
+	const gsl_rng_type* tp2 = gsl_rng_minstd;
+	gsl_rng* pr2 = gsl_rng_alloc(tp2);
+	gsl_monte_vegas_init(ps2);
+	gsl_monte_vegas_integrate(&f2,
+		xl2, xu2, dimension, calls,
+		pr2, ps2, &result2, &er2);
+	//与悬臂上边的作用
+	f3.dim = dimension;
+	f3.f = function_y_para; //被积函数的名字
+	f3.params = &par;
+	double xl3[] = { -w11, w1 + um * oyz, xsite, ysite, -t2 }, xu3[] = { 0,y_period + um * oyz,  xsite + w22, ysite + l22, 0 };
+	double result3 = 0, er3 = 0;
+	gsl_monte_vegas_state* ps3 = gsl_monte_vegas_alloc(dimension);
+	const gsl_rng_type* tp3 = gsl_rng_minstd;
+	gsl_rng* pr3 = gsl_rng_alloc(tp3);
+	gsl_monte_vegas_init(ps3);
+	gsl_monte_vegas_integrate(&f3,
+		xl3, xu3, dimension, calls,
+		pr3, ps3, &result3, &er3);
+	//与悬臂下边的作用
+	f4.dim = dimension;
+	f4.f = function_y_antipara; //被积函数的名字
+	f4.params = &par;
+	double xl4[] = { l1 , w1 + um * oyz,xsite, ysite, -t2 }, xu4[] = { l1 + w11, y_period + um * oyz, xsite + w22, ysite + l22, 0 };
+	double result4 = 0, er4 = 0;
+	gsl_monte_vegas_state* ps4 = gsl_monte_vegas_alloc(dimension);
+	const gsl_rng_type* tp4 = gsl_rng_minstd;
+	gsl_rng* pr4 = gsl_rng_alloc(tp4);
+	gsl_monte_vegas_init(ps4);
+	gsl_monte_vegas_integrate(&f4,
+		xl4, xu4, dimension, calls,
+		pr4, ps4, &result4, &er4);
+	//求和
+	if ((abs(n) % 2) == 0)//n是偶数，说明短条沿着y负向极化
+	{
+		result_force[oyz][k + k_number][n + n_number][1] = result1 + result2 + result3 + result4;
+	}
+	if ((abs(n) % 2) == 1)//n是奇数，说明短条沿着y正向极化
+	{
+		result_force[oyz][k + k_number][n + n_number][1] = -(result1 + result2 + result3 + result4);
+	}
+	//释放内存空间
+	gsl_monte_vegas_free(ps1);
+	gsl_monte_vegas_free(ps2);
+	gsl_monte_vegas_free(ps3);
+	gsl_monte_vegas_free(ps4);
+}
+
+
+// 运行程序: Ctrl + F5 或调试 >“开始执行(不调试)”菜单
+// 调试程序: F5 或调试 >“开始调试”菜单
+
+// 入门使用技巧: 
+//   1. 使用解决方案资源管理器窗口添加/管理文件
+//   2. 使用团队资源管理器窗口连接到源代码管理
+//   3. 使用输出窗口查看生成输出和其他消息
+//   4. 使用错误列表窗口查看错误
+//   5. 转到“项目”>“添加新项”以创建新的代码文件，或转到“项目”>“添加现有项”以将现有代码文件添加到项目
+//   6. 将来，若要再次打开此项目，请转到“文件”>“打开”>“项目”并选择 .sln 文件

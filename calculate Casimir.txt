@@ -1,0 +1,379 @@
+// casimir force.cpp : 此文件包含 "main" 函数。程序执行将在此处开始并结束。
+//注释 Ctrl+K and Ctrl+C, 取消注释Ctrl+K and Ctrl+U
+#include <iostream>
+#include <time.h>
+#include <cmath>
+#include <gsl/gsl_rng.h>
+#include <gsl/gsl_monte.h>
+#include <gsl/gsl_monte_vegas.h> 
+#include <fstream> 
+#include <omp.h> 
+#include <ctime> 
+using namespace std;
+struct my_par
+{
+	double a, b, c;
+};
+
+double function_1(double* x, size_t dim, void* params); //region #1 tip
+double function_2(double* x, size_t dim, void* params); //region #2 tip
+double function_3(double* x, size_t dim, void* params); //region #3 tip
+double function_4(double* x, size_t dim, void* params); //region #4 tip
+double function_5(double* x, size_t dim, void* params); //cantilever
+double function_6(double* x, size_t dim, void* params); //tip
+
+void integral_1(int oyz); //tip
+void integral_2(int oyz); //tip
+void integral_3(int oyz); //tip
+void integral_4(int oyz); //tip
+void integral_5(int oyz); //cantilever
+void integral_6(int oyz); //sample_outer
+void integral_7(int oyz); //sample_inner
+
+const double d = 2e-6, h = 9.1e-6, A = 3e-9; //tip
+const double l1 = 3e-6, l2 = 3e-6, w = 3e-6, period = 10e-6, step = 1e-6; //tip
+const double wc = 48e-6, lc = 450e-6; //cantilever
+const double l_outer = 20e-6, l_inner = 8e-6, w_outer = 52e-6, w_inner = 40e-6;
+
+double hbar=1.0545e-34, c = 3e8;
+double coefficient = -3.14*3.14*hbar*c / 240;
+const int max_drift = 40; 
+const int dimension = 2;
+
+const int tip_call_times = 1e6;
+const int cantilever_call_times = 1e6; //no difference between 1e6, 1e7 and 1e8
+const int sample_call_times = 1e6;
+
+double tip_force[max_drift][4];
+double tip_final_force[max_drift];
+
+double cantilever_force[max_drift];
+
+double sample_force[max_drift][2];
+double sample_final_force[max_drift];
+
+char tip_file_name[200] = "tip.txt";
+char cantilever_file_name[200] = "cantilever.txt";
+char sample_file_name[200] = "sample.txt";
+char check_name[200] = "check.txt";
+int oyz;
+
+int main()
+{
+	gsl_rng_default_seed = ((unsigned long)(time(NULL)));
+	for (oyz = 0; oyz < max_drift; oyz++)  //initialize the list
+	{
+		tip_final_force[oyz] = 0;
+		tip_force[oyz][0] = 0;
+		tip_force[oyz][1] = 0;
+		tip_force[oyz][2] = 0;
+		tip_force[oyz][3] = 0;
+	}
+    
+	double tip = 0;
+#pragma omp parallel for private (oyz)
+	for (oyz = 0; oyz < max_drift; oyz++) //start computing
+	{
+		integral_1(oyz);
+		integral_2(oyz);
+		integral_3(oyz);
+		integral_4(oyz);
+		tip++;
+		cout << tip / max_drift * 100 << "% tip completed" << endl;//monitor the process
+	}
+
+	double cantilever = 0;
+#pragma omp parallel for private (oyz)
+	for (oyz = 0; oyz < max_drift; oyz++) //start computing
+	{
+		integral_5(oyz);
+		cantilever++;
+		cout << cantilever / max_drift * 100 << "% cantilever completed" << endl;//monitor the process
+	}
+
+	double sample = 0;
+#pragma omp parallel for private (oyz)
+	for (oyz = 0; oyz < max_drift; oyz++) //start computing
+	{
+		integral_6(oyz);
+		integral_7(oyz);
+		sample++;
+		cout << sample / max_drift * 100 << "% sample completed" << endl;//monitor the process
+	}
+
+	for (oyz = 0; oyz < max_drift; oyz++) //calculate the result
+	{
+		tip_final_force[oyz] = tip_force[oyz][0] + tip_force[oyz][1] + tip_force[oyz][2] + tip_force[oyz][3];
+		sample_final_force[oyz] = sample_force[oyz][0] - sample_force[oyz][1];
+	}
+
+
+	ofstream fout;
+	fout.open(tip_file_name, ios::app);
+	for (int oyz = 0; oyz < max_drift; oyz++)
+		fout << oyz * step << " " << tip_final_force[oyz] << endl;
+	fout.close();
+
+	fout.open(cantilever_file_name, ios::app);
+	for (int oyz = 0; oyz < max_drift; oyz++)
+		fout << oyz * step << " " << cantilever_force[oyz] << endl;
+	fout.close();
+
+	fout.open(sample_file_name, ios::app);
+	for (int oyz = 0; oyz < max_drift; oyz++)
+		fout << oyz * step << " " << sample_final_force[oyz] << endl;
+	fout.close();
+
+	fout.open(check_name, ios::app);
+	fout << "d: " << d << endl;
+	fout << "h: " << h << endl;
+	fout << "A: " << A << endl;
+	fout << "l1: " << l1 << endl;
+	fout << "l2: " << l2 << endl;
+	fout << "w: " << w << endl;
+	fout << "period: " << period << endl;
+	fout << "wc: " << wc << endl;
+	fout << "lc: " << lc << endl;
+	fout << "w_outer: " << w_outer << endl;
+	fout << "l_outer: " << l_outer << endl;
+	fout << "w_inner: " << w_inner << endl;
+	fout << "l_inner: " << l_inner << endl;
+	fout << "tip_call_times: " << tip_call_times << endl;
+	fout << "cantilever_call_times: " << cantilever_call_times << endl;
+	fout << "sample_call_times: " << cantilever_call_times << endl;
+	fout << "step: " << step << endl;
+	fout.close();
+
+	return 0;
+}
+
+double function_1(double* x, size_t dim, void* params)
+{
+	my_par* mp = (my_par*)params;
+	double f;
+	f = coefficient * 1 / pow((d + h / l2 * x[1] + h / w * x[0] + A * sin(3.14 / period * (x[1]+mp->a*step))), 4);
+	if (x[0] < (1 - x[1] / l2)*w)
+		return f;
+	else 
+		return 0;
+}
+
+double function_2(double* x, size_t dim, void* params)
+{
+	my_par* mp = (my_par*)params;
+	double f;
+	f = coefficient * 1 / pow((d - h / l1 * x[1] + h / w * x[0] + A * sin(3.14 / period * (x[1] + mp->a*step))), 4);
+	if (x[0] < (1 + x[1] / l1)*w)
+		return f;
+	else
+		return 0;
+}
+
+double function_3(double* x, size_t dim, void* params)
+{
+	my_par* mp = (my_par*)params;
+	double f;
+	f = coefficient * 1 / pow((d - h / l1 * x[1] - h / w * x[0] + A * sin(3.14 / period * (x[1] + mp->a*step))), 4);
+	if (x[0] > -(1 + x[1] / l1)*w)
+		return f;
+	else
+		return 0;
+}
+
+double function_4(double* x, size_t dim, void* params)
+{
+	my_par* mp = (my_par*)params;
+	double f;
+	f = coefficient * 1 / pow((d + h / l2 * x[1] - h / w * x[0] + A * sin(3.14 / period * (x[1] + mp->a*step))), 4);
+	if (x[0] > -(1 - x[1] / l2)*w)
+		return f;
+	else
+		return 0;
+}
+
+double function_5(double* x, size_t dim, void* params)
+{
+	my_par* mp = (my_par*)params;
+	double f;
+	f = coefficient * 1 / pow((d + h + A * sin(3.14 / period * (x[1] + mp->a*step))), 4);
+	return f;
+}
+
+double function_6(double* x, size_t dim, void* params)
+{
+	my_par* mp = (my_par*)params;
+	double f;
+	f = coefficient * 1 / pow((-4.0e-6 + d + h + A * sin(3.14 / period * (x[1] + mp->a*step))), 4);
+	return f;
+}
+
+void integral_1(int oyz)
+{
+	my_par par = { oyz,0,0 };
+	gsl_monte_function f1;
+	f1.dim = dimension;
+	f1.f = function_1; 
+	f1.params = &par;
+	int calls = tip_call_times;
+	double xl1[] = { 0, 0 }, xu1[] = { w, l2};
+	double result1 = 0, er1 = 0;
+	gsl_monte_vegas_state* ps1 = gsl_monte_vegas_alloc(dimension);
+	const gsl_rng_type* tp1 = gsl_rng_minstd;
+	gsl_rng* pr1 = gsl_rng_alloc(tp1);
+	gsl_monte_vegas_init(ps1);
+	gsl_monte_vegas_integrate(&f1,
+		xl1, xu1, dimension, calls,
+		pr1, ps1, &result1, &er1);
+	tip_force[oyz][0] = result1;
+	gsl_monte_vegas_free(ps1);
+}
+
+void integral_2(int oyz)
+{
+	my_par par = { oyz,0,0 };
+	gsl_monte_function f1;
+	f1.dim = dimension;
+	f1.f = function_2; 
+	f1.params = &par;
+	int calls = tip_call_times;
+	double xl1[] = { 0, -l1 }, xu1[] = { w, 0};
+	double result1 = 0, er1 = 0;
+	gsl_monte_vegas_state* ps1 = gsl_monte_vegas_alloc(dimension);
+	const gsl_rng_type* tp1 = gsl_rng_minstd;
+	gsl_rng* pr1 = gsl_rng_alloc(tp1);
+	gsl_monte_vegas_init(ps1);
+	gsl_monte_vegas_integrate(&f1,
+		xl1, xu1, dimension, calls,
+		pr1, ps1, &result1, &er1);
+	tip_force[oyz][1] = result1;
+	gsl_monte_vegas_free(ps1);
+}
+
+void integral_3(int oyz)
+{
+	my_par par = { oyz,0,0 };
+	gsl_monte_function f1;
+	f1.dim = dimension;
+	f1.f = function_3; 
+	f1.params = &par;
+	int calls = tip_call_times;
+	double xl1[] = { -w, -l1 }, xu1[] = { 0, 0 };
+	double result1 = 0, er1 = 0;
+	gsl_monte_vegas_state* ps1 = gsl_monte_vegas_alloc(dimension);
+	const gsl_rng_type* tp1 = gsl_rng_minstd;
+	gsl_rng* pr1 = gsl_rng_alloc(tp1);
+	gsl_monte_vegas_init(ps1);
+	gsl_monte_vegas_integrate(&f1,
+		xl1, xu1, dimension, calls,
+		pr1, ps1, &result1, &er1);
+	tip_force[oyz][2] = result1;
+	gsl_monte_vegas_free(ps1);
+}
+
+void integral_4(int oyz)
+{
+	my_par par = { oyz,0,0 };
+	gsl_monte_function f1;
+	f1.dim = dimension;
+	f1.f = function_4; 
+	f1.params = &par;
+	int calls = tip_call_times;
+	double xl1[] = { -w, 0 }, xu1[] = { 0, l2};
+	double result1 = 0, er1 = 0;
+	gsl_monte_vegas_state* ps1 = gsl_monte_vegas_alloc(dimension);
+	const gsl_rng_type* tp1 = gsl_rng_minstd;
+	gsl_rng* pr1 = gsl_rng_alloc(tp1);
+	gsl_monte_vegas_init(ps1);
+	gsl_monte_vegas_integrate(&f1,
+		xl1, xu1, dimension, calls,
+		pr1, ps1, &result1, &er1);
+	tip_force[oyz][3] = result1;
+	gsl_monte_vegas_free(ps1);
+}
+
+void integral_5(int oyz)
+{
+	my_par par = { oyz,0,0 };
+	gsl_monte_function f1;
+	f1.dim = dimension;
+	f1.f = function_5;
+	f1.params = &par;
+	int calls = cantilever_call_times;
+	double xl1[] = { -wc/2, 0 }, xu1[] = { wc/2, lc };
+	double result1 = 0, er1 = 0;
+	gsl_monte_vegas_state* ps1 = gsl_monte_vegas_alloc(dimension);
+	const gsl_rng_type* tp1 = gsl_rng_minstd;
+	gsl_rng* pr1 = gsl_rng_alloc(tp1);
+	gsl_monte_vegas_init(ps1);
+	gsl_monte_vegas_integrate(&f1,
+		xl1, xu1, dimension, calls,
+		pr1, ps1, &result1, &er1);
+	cantilever_force[oyz] = result1;
+	gsl_monte_vegas_free(ps1);
+}
+
+void integral_6(int oyz)
+{
+	my_par par = { oyz,0,0 };
+	gsl_monte_function f1;
+	f1.dim = dimension;
+	f1.f = function_6;
+	f1.params = &par;
+	int calls = cantilever_call_times;
+	double xl1[] = { -w_outer / 2, 0 }, xu1[] = { w_outer / 2, l_outer };
+	double result1 = 0, er1 = 0;
+	gsl_monte_vegas_state* ps1 = gsl_monte_vegas_alloc(dimension);
+	const gsl_rng_type* tp1 = gsl_rng_minstd;
+	gsl_rng* pr1 = gsl_rng_alloc(tp1);
+	gsl_monte_vegas_init(ps1);
+	gsl_monte_vegas_integrate(&f1,
+		xl1, xu1, dimension, calls,
+		pr1, ps1, &result1, &er1);
+	sample_force[oyz][0] = result1;
+	gsl_monte_vegas_free(ps1);
+}
+
+void integral_7(int oyz)
+{
+	my_par par = { oyz,0,0 };
+	gsl_monte_function f1;
+	f1.dim = dimension;
+	f1.f = function_6;
+	f1.params = &par;
+	int calls = cantilever_call_times;
+	double xl1[] = { -w_inner / 2, 0 }, xu1[] = { w_inner / 2, l_inner };
+	double result1 = 0, er1 = 0;
+	gsl_monte_vegas_state* ps1 = gsl_monte_vegas_alloc(dimension);
+	const gsl_rng_type* tp1 = gsl_rng_minstd;
+	gsl_rng* pr1 = gsl_rng_alloc(tp1);
+	gsl_monte_vegas_init(ps1);
+	gsl_monte_vegas_integrate(&f1,
+		xl1, xu1, dimension, calls,
+		pr1, ps1, &result1, &er1);
+	sample_force[oyz][1] = result1;
+	gsl_monte_vegas_free(ps1);
+}
+
+// 运行程序: ctrl + f5 或调试 >“开始执行(不调试)”菜单
+// 调试程序: f5 或调试 >“开始调试”菜单
+
+// 入门使用技巧: 
+//   1. 使用解决方案资源管理器窗口添加/管理文件
+//   2. 使用团队资源管理器窗口连接到源代码管理
+//   3. 使用输出窗口查看生成输出和其他消息
+//   4. 使用错误列表窗口查看错误
+//   5. 转到“项目”>“添加新项”以创建新的代码文件，或转到“项目”>“添加现有项”以将现有代码文件添加到项目
+//   6. 将来，若要再次打开此项目，请转到“文件”>“打开”>“项目”并选择 .sln 文件
+
+
+//test random number generator
+//gsl_rng * r;
+//const gsl_rng_type * T;
+//gsl_rng_default_seed = ((unsigned long)(time(NULL)));
+//T = gsl_rng_taus;
+//r = gsl_rng_alloc(T);
+//for (int i = 0; i < 100; i++)
+//{
+//	cout << gsl_rng_get(r) << endl;
+//}
+//gsl_rng_free(r);
